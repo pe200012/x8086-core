@@ -4,8 +4,35 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE ViewPatterns #-}
 
-module Core where
+module Core
+    ( CPU(..)
+    , emptyCPU
+    , al
+    , ah
+    , bl
+    , bh
+    , cl
+    , ch
+    , dl
+    , dh
+    , lowBit
+    , highBit
+    , Memory(unMemory)
+    , memoryUnits
+    , maxMemory
+    , emptyMemory
+    , physicalAddr
+    , peekMemory
+    , VideoMode(..)
+    , videoModeCode
+    , Computer(..)
+    , mov
+    , xchg
+    , Operand(..)
+    , int
+    ) where
 
 import           Control.Lens
 import           Data.Bits                      ( Bits(..) )
@@ -40,6 +67,9 @@ data CPU = CPU
     deriving (Show, Eq)
 
 makeLenses ''CPU
+
+emptyCPU :: CPU
+emptyCPU = CPU 0 0 0 0 0 0 0 0 0 0 0 0 0 0
 
 al :: Lens' CPU Word8
 al f c = fmap (\x -> c { _ax = (_ax c .&. 0xFF00) .|. x }) (fromIntegral <$> f (fromIntegral (_ax c)))
@@ -125,9 +155,32 @@ peekMemory (Memory mem) addr | addr < 0                       = Nothing
                              | otherwise                      = Just (mem ! fromIntegral addr)
 {-# INLINE peekMemory #-}
 
+data VideoMode = TextMode
+               { _textModeWidth  :: Int
+               , _textModeHeight :: Int
+               , _textModeColors :: Int
+               , _textModePages :: Int
+               }
+               | GraphicMode
+               { _graphicModeWidth  :: Int
+               , _graphicModeHeight :: Int
+               , _graphicModePixelWidth  :: Int
+               , _graphicModePixelHeight :: Int
+               , _graphicModeColors :: Int
+               , _graphicModePages :: Int
+               }
+                deriving (Show, Eq)
+
+videoModeCode :: Word8 -> Either String VideoMode
+videoModeCode 0x00 = Right $ TextMode 40 25 16 8
+videoModeCode 0x03 = Right $ TextMode 80 25 16 8
+videoModeCode 0x13 = Right $ GraphicMode 40 25 320 200 256 1
+videoModeCode _    = Left "videoModeCode: unsupported video mode"
+
 data Computer = Computer
-    { _cpu    :: CPU
-    , _memory :: Memory
+    { _cpu       :: CPU
+    , _memory    :: Memory
+    , _videoMode :: VideoMode
     }
     deriving (Show, Eq)
 
@@ -162,101 +215,90 @@ registerSelector FLAGS = Right flags
 {-# INLINE registerSelector #-}
 
 compareRegister :: Register -> Register -> Ordering
-compareRegister AL AL = EQ
-compareRegister AL BL = EQ
-compareRegister AL CL = EQ
-compareRegister AL DL = EQ
-compareRegister AL AH = EQ
-compareRegister AL BH = EQ
-compareRegister AL CH = EQ
-compareRegister AL DH = EQ
-compareRegister AL _  = LT
-compareRegister AH AL = EQ
-compareRegister AH BL = EQ
-compareRegister AH CL = EQ
-compareRegister AH DL = EQ
-compareRegister AH AH = EQ
-compareRegister AH BH = EQ
-compareRegister AH CH = EQ
-compareRegister AH DH = EQ
-compareRegister AH _  = LT
-compareRegister BL AL = EQ
-compareRegister BL BL = EQ
-compareRegister BL CL = EQ
-compareRegister BL DL = EQ
-compareRegister BL AH = EQ
-compareRegister BL BH = EQ
-compareRegister BL CH = EQ
-compareRegister BL DH = EQ
-compareRegister BL _  = LT
-compareRegister BH AL = EQ
-compareRegister BH BL = EQ
-compareRegister BH CL = EQ
-compareRegister BH DL = EQ
-compareRegister BH AH = EQ
-compareRegister BH BH = EQ
-compareRegister BH CH = EQ
-compareRegister BH DH = EQ
-compareRegister BH _  = LT
-compareRegister CL AL = EQ
-compareRegister CL BL = EQ
-compareRegister CL CL = EQ
-compareRegister CL DL = EQ
-compareRegister CL AH = EQ
-compareRegister CL BH = EQ
-compareRegister CL CH = EQ
-compareRegister CL DH = EQ
-compareRegister CL _  = LT
-compareRegister CH AL = EQ
-compareRegister CH BL = EQ
-compareRegister CH CL = EQ
-compareRegister CH DL = EQ
-compareRegister CH AH = EQ
-compareRegister CH BH = EQ
-compareRegister CH CH = EQ
-compareRegister CH DH = EQ
-compareRegister CH _  = LT
-compareRegister DL AL = EQ
-compareRegister DL BL = EQ
-compareRegister DL CL = EQ
-compareRegister DL DL = EQ
-compareRegister DL AH = EQ
-compareRegister DL BH = EQ
-compareRegister DL CH = EQ
-compareRegister DL DH = EQ
-compareRegister DL _  = LT
-compareRegister DH AL = EQ
-compareRegister DH BL = EQ
-compareRegister DH CL = EQ
-compareRegister DH DL = EQ
-compareRegister DH AH = EQ
-compareRegister DH BH = EQ
-compareRegister DH CH = EQ
-compareRegister DH DH = EQ
-compareRegister DH _  = LT
-compareRegister _  _  = EQ
+compareRegister AL    AL = EQ
+compareRegister AL    BL = EQ
+compareRegister AL    CL = EQ
+compareRegister AL    DL = EQ
+compareRegister AL    AH = EQ
+compareRegister AL    BH = EQ
+compareRegister AL    CH = EQ
+compareRegister AL    DH = EQ
+compareRegister AL    _  = LT
+compareRegister AH    x  = compareRegister AL x
+compareRegister BL    x  = compareRegister AL x
+compareRegister BH    x  = compareRegister AL x
+compareRegister CL    x  = compareRegister AL x
+compareRegister CH    x  = compareRegister AL x
+compareRegister DL    x  = compareRegister AL x
+compareRegister DH    x  = compareRegister AL x
+compareRegister AX    AL = GT
+compareRegister AX    AH = GT
+compareRegister AX    BL = GT
+compareRegister AX    BH = GT
+compareRegister AX    CL = GT
+compareRegister AX    CH = GT
+compareRegister AX    DL = GT
+compareRegister AX    DH = GT
+compareRegister AX    _  = EQ
+compareRegister BX    x  = compareRegister AX x
+compareRegister CX    x  = compareRegister AX x
+compareRegister DX    x  = compareRegister AX x
+compareRegister SP    x  = compareRegister AX x
+compareRegister BP    x  = compareRegister AX x
+compareRegister SI    x  = compareRegister AX x
+compareRegister DI    x  = compareRegister AX x
+compareRegister IP    x  = compareRegister AX x
+compareRegister CS    x  = compareRegister AX x
+compareRegister DS    x  = compareRegister AX x
+compareRegister ES    x  = compareRegister AX x
+compareRegister SS    x  = compareRegister AX x
+compareRegister FLAGS x  = compareRegister AX x
+
+isSegmentRegister :: Register -> Bool
+isSegmentRegister CS = True
+isSegmentRegister DS = True
+isSegmentRegister ES = True
+isSegmentRegister SS = True
+isSegmentRegister _  = False
 
 data Operand = Register Register | Immediate16 Word16 | Immediate8 Word8 | MemoryUnit Word16
     deriving (Show, Eq)
 
+-- | @mov dst src c@ copies the value of `src` to `dst`.
 mov :: Operand -> Operand -> Computer -> Either String Computer
-mov (Register r1) (Register r2) c = case compareRegister r1 r2 of
-    LT -> Left "mov: register size mismatch"
-    _ ->
-        let (Right f1) = registerSelector @Identity @Identity r1
-            (Right f2) = registerSelector @(Const Word16) @Identity r2
-        in  Right $ c & cpu . f1 .~ (c ^. cpu . f2)
-mov (Register r1) (Immediate16 i) c = case compareRegister r1 AX of
-    LT -> Left "mov: register size mismatch"
-    _  -> let (Right f1) = registerSelector @Identity @Identity r1 in Right $ c & cpu . f1 .~ i
-mov (Register r1) (Immediate8 i) c = case compareRegister AL r1 of
-    LT -> Left "mov: register size mismatch"
-    _  -> let (Right f1) = registerSelector @Identity @Identity r1 in Right $ c & cpu . f1 .~ fromIntegral i
-mov (Register r1) (MemoryUnit m) c = case compareRegister r1 AX of
-    LT -> Left "mov: register size mismatch"
-    _  -> case c ^? memory . ix m of
-        Nothing -> Left "mov: memory unit out of bounds"
-        Just i  -> let (Right f1) = registerSelector @Identity @Identity r1 in Right $ c & cpu . f1 .~ fromIntegral i
+mov (Register r1) (Register r2) c
+    | r1 == IP = Left "mov: cannot change IP register"
+    | otherwise = case compareRegister r1 r2 of
+        LT -> Left "mov: register size mismatch"
+        GT -> Left "mov: register size mismatch"
+        EQ ->
+            let (Right f1) = registerSelector @Identity @Identity r1
+                (Right f2) = registerSelector @(Const Word16) @Identity r2
+            in  Right $ c & cpu . f1 .~ (c ^. cpu . f2)
+mov (Register r1) (Immediate16 i) c
+    | isSegmentRegister r1 = Left "mov: cannot directly change segment register"
+    | r1 == IP = Left "mov: cannot change IP register"
+    | otherwise = case compareRegister r1 AX of
+        LT -> Left "mov: register size mismatch"
+        _  -> let (Right f1) = registerSelector @Identity @Identity r1 in Right $ c & cpu . f1 .~ i
+mov (Register r1) (Immediate8 i) c
+    | isSegmentRegister r1 = Left "mov: cannot directly change segment register"
+    | r1 == IP = Left "mov: cannot change IP register"
+    | otherwise = case compareRegister AL r1 of
+        LT -> Left "mov: register size mismatch"
+        _  -> let (Left f1) = registerSelector @Identity @Identity r1 in Right $ c & cpu . f1 .~ fromIntegral i
+mov (Register r1) (MemoryUnit m) c
+    | isSegmentRegister r1 = Left "mov: cannot directly change segment register"
+    | r1 == IP = Left "mov: cannot change IP register"
+    | otherwise = case compareRegister r1 AX of
+        LT -> case c ^? memory . ix m of
+            Nothing -> Left "mov: invalid memory address"
+            Just v  -> let (Left f1) = registerSelector @(Const Word8) @Identity r1 in Right $ c & cpu . f1 .~ v
+        _ -> case c ^? memory . ix m of
+            Nothing                  -> Left "mov: memory unit out of bounds"
+            Just (fromIntegral -> i) -> case c ^? memory . ix (m + 1) of
+                Nothing                  -> Left "mov: memory unit out of bounds"
+                Just (fromIntegral -> j) -> let (Right f1) = registerSelector @Identity @Identity r1 in Right $ c & cpu . f1 .~ (i .|. (j `shiftL` 8))
 mov (Immediate16 _) _ _ = Left "mov: immediate16 cannot be used as destination"
 mov (Immediate8  _) _ _ = Left "mov: immediate8 cannot be used as destination"
 mov (MemoryUnit u) (Register r) c
@@ -277,3 +319,101 @@ mov (MemoryUnit u) (Immediate8 i) c | u < 0 || fromIntegral u >= memoryBound = L
                                     | otherwise                              = Right $ c & memory . ix u .~ i
     where memoryBound = c ^. memory . to (V.length . unMemory)
 mov (MemoryUnit _) (MemoryUnit _) _ = Left "mov: memory unit cannot be used both as source and destination"
+
+{-
+
+>>> c = emptyCPU & ax .~ 0
+>>> m = Memory $ V.fromList [0,0,0,0]
+>>> com = Computer c m
+
+>>> (_ax._cpu <$> mov (Register AL) (Immediate8 0x12) com) == Right 0x0012
+True
+
+>>> (_ax._cpu <$> mov (Register AX) (Immediate16 0x2424) com) == Right 0x2424
+True
+
+>>> (_memory <$> mov (MemoryUnit 1) (Immediate16 0x2421) com)
+Right (Memory {unMemory = [0,33,36,0]})
+
+>>> (_memory <$> mov (MemoryUnit 3) (Immediate16 0x2421) com)
+Left "mov: memory unit out of bounds"
+
+>>> Right com1 = mov (MemoryUnit 2) (Immediate16 0x1981) com
+
+>>> mov (Register AX) (MemoryUnit 2) com1
+Right (Computer {_cpu = CPU {_ax = 6529, _bx = 0, _cx = 0, _dx = 0, _sp = 0, _bp = 0, _si = 0, _di = 0, _ip = 0, _cs = 0, _ds = 0, _es = 0, _ss = 0, _flags = 0}, _memory = Memory {unMemory = [0,0,129,25]}})
+
+>>> mov (Register AL) (MemoryUnit 2) com1
+Right (Computer {_cpu = CPU {_ax = 129, _bx = 0, _cx = 0, _dx = 0, _sp = 0, _bp = 0, _si = 0, _di = 0, _ip = 0, _cs = 0, _ds = 0, _es = 0, _ss = 0, _flags = 0}, _memory = Memory {unMemory = [0,0,129,25]}})
+
+-}
+
+-- |
+xchg :: Operand -> Operand -> Computer -> Either String Computer
+xchg (Register r1) (Register r2) c = case compareRegister r1 r2 of
+    LT -> Left "xchg: register size mismatch"
+    GT -> Left "xchg: register size mismatch"
+    EQ ->
+        let (Right rr1) = registerSelector @Identity @Identity r1
+            (Right rr2) = registerSelector @Identity @Identity r2
+            (Right wr1) = registerSelector @(Const Word16) @Identity r1
+            (Right wr2) = registerSelector @(Const Word16) @Identity r2
+        in  Right $ c & cpu . rr1 .~ (c ^. cpu . wr2) & cpu . rr2 .~ (c ^. cpu . wr1)
+xchg (Register r) (MemoryUnit u) c = case compareRegister r AX of
+    LT ->
+        let (Left rr) = registerSelector @(Const Word16) @(Const Word8) r
+            (Left wr) = registerSelector @Identity @Identity r
+        in  case c ^? memory . ix u of
+                Nothing -> Left "xchg: memory unit out of bounds"
+                Just i  -> Right $ c & cpu . wr .~ i & memory . ix u .~ (c ^. cpu . rr)
+    _ -> case c ^? memory . ix u of
+        Nothing                  -> Left "xchg: memory unit out of bounds"
+        Just (fromIntegral -> i) -> case c ^? memory . ix (u + 1) of
+            Nothing -> Left "xchg: memory unit out of bounds"
+            Just (fromIntegral -> j) ->
+                let val        = i .|. (j `shiftL` 8)
+                    (Right wr) = registerSelector @Identity @Identity r
+                    (Right rr) = registerSelector @(Const Word16) @Identity r
+                in  Right $ c & cpu . wr .~ val & memory . ix u .~ lowBit (c ^. cpu . rr) & memory . ix (u + 1) .~ highBit (c ^. cpu . rr)
+xchg (Register    _) (Immediate16 _) _ = Left "xchg: immediate16 cannot be used as destination"
+xchg (Register    _) (Immediate8  _) _ = Left "xchg: immediate8 cannot be used as destination"
+xchg (Immediate16 _) _               _ = Left "xchg: immediate16 cannot be used as source"
+xchg (Immediate8  _) _               _ = Left "xchg: immediate8 cannot be used as source"
+-- xchg (MemoryUnit u) (Register r) c = case
+xchg (MemoryUnit  _) (MemoryUnit _)  _ = Left "xchg: memory unit cannot be used both as source and destination"
+xchg (MemoryUnit  u) (Register   r)  c = case compareRegister r AX of
+    LT ->
+        let (Left rr) = registerSelector @(Const Word16) @(Const Word8) r
+            (Left wr) = registerSelector @Identity @Identity r
+        in  case c ^? memory . ix u of
+                Nothing -> Left "xchg: memory unit out of bounds"
+                Just i  -> Right $ c & cpu . wr .~ i & memory . ix u .~ (c ^. cpu . rr)
+    _ -> case c ^? memory . ix u of
+        Nothing                  -> Left "xchg: memory unit out of bounds"
+        Just (fromIntegral -> i) -> case c ^? memory . ix (u + 1) of
+            Nothing -> Left "xchg: memory unit out of bounds"
+            Just (fromIntegral -> j) ->
+                let val        = i .|. (j `shiftL` 8)
+                    (Right wr) = registerSelector @Identity @Identity r
+                    (Right rr) = registerSelector @(Const Word16) @Identity r
+                in  Right $ c & cpu . wr .~ val & memory . ix u .~ lowBit (c ^. cpu . rr) & memory . ix (u + 1) .~ highBit (c ^. cpu . rr)
+xchg (MemoryUnit _) (Immediate16 _) _ = Left "xchg: immediate16 cannot be used as destination"
+xchg (MemoryUnit _) (Immediate8  _) _ = Left "xchg: immediate8 cannot be used as destination"
+
+{-
+
+>>> c = emptyCPU & ax .~ 0x0012 & bx .~ 0x1211
+>>> m = Memory $ V.fromList [0x0011,0,0,0]
+>>> com = Computer c m
+
+>>> xchg (Register AL) (MemoryUnit 0) com
+Right (Computer {_cpu = CPU {_ax = 17, _bx = 4625, _cx = 0, _dx = 0, _sp = 0, _bp = 0, _si = 0, _di = 0, _ip = 0, _cs = 0, _ds = 0, _es = 0, _ss = 0, _flags = 0}, _memory = Memory {unMemory = [18,0,0,0]}})
+
+>>> xchg (Register AX) (Register BX) com
+Right (Computer {_cpu = CPU {_ax = 4625, _bx = 18, _cx = 0, _dx = 0, _sp = 0, _bp = 0, _si = 0, _di = 0, _ip = 0, _cs = 0, _ds = 0, _es = 0, _ss = 0, _flags = 0}, _memory = Memory {unMemory = [17,0,0,0]}})
+
+-}
+
+-- | 8086 interrupts
+int :: Int -> Computer -> Either String Computer
+int _ _ = Left "int: unsupported interrupt"
