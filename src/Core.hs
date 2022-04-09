@@ -36,7 +36,12 @@ module Core
 
 import           Control.Lens
 import           Data.Bits                      ( Bits(..) )
-import           Data.Maybe                     ( fromMaybe )
+import           Data.Foldable                  ( Foldable(foldl')
+                                                , asum
+                                                )
+import           Data.Maybe                     ( fromMaybe
+                                                , isNothing
+                                                )
 import           Data.Vector.Unboxed            ( (!)
                                                 , (!?)
                                                 , Vector
@@ -126,6 +131,9 @@ instance At Memory where
     at i = lens ((!? fromIntegral i) . unMemory) (\(Memory m) x -> Memory (m & ix (fromIntegral i) .~ fromMaybe 0 x))
 instance Ixed Memory
 
+memorySize :: Memory -> Int
+memorySize = V.length . unMemory
+
 -- >>> (Memory $ replicate 10 0xFF) ^? ix 5
 
 memoryUnits :: IndexedTraversal' Word Memory Word8
@@ -149,11 +157,18 @@ physicalAddr :: Word16 -> Word16 -> Word16
 physicalAddr segment offset = segment * 16 + offset
 {-# INLINE physicalAddr #-}
 
-peekMemory :: Memory -> Word16 -> Maybe Word8
-peekMemory (Memory mem) addr | addr < 0                       = Nothing
-                             | addr >= fromIntegral maxMemory = Nothing
-                             | otherwise                      = Just (mem ! fromIntegral addr)
-{-# INLINE peekMemory #-}
+class PeekMemory bitSize where
+    peekMemory :: Memory -> Word16 -> Maybe bitSize
+
+instance PeekMemory Word8 where
+    peekMemory (Memory mem) addr | addr < 0                          = Nothing
+                                 | fromIntegral addr >= V.length mem = Nothing
+                                 | otherwise                         = Just (mem ! fromIntegral addr)
+
+instance PeekMemory Word16 where
+    peekMemory (Memory mem) addr | addr < 0  = Nothing
+                                 | fromIntegral (addr + 1) >= V.length mem = Nothing
+                                 | otherwise = Just (fromIntegral (mem ! fromIntegral addr) .|. (fromIntegral (mem ! fromIntegral (addr + 1)) `shiftL` 8))
 
 data VideoMode = TextMode
                { _textModeWidth  :: Int
@@ -411,6 +426,97 @@ Right (Computer {_cpu = CPU {_ax = 17, _bx = 4625, _cx = 0, _dx = 0, _sp = 0, _b
 
 >>> xchg (Register AX) (Register BX) com
 Right (Computer {_cpu = CPU {_ax = 4625, _bx = 18, _cx = 0, _dx = 0, _sp = 0, _bp = 0, _si = 0, _di = 0, _ip = 0, _cs = 0, _ds = 0, _es = 0, _ss = 0, _flags = 0}, _memory = Memory {unMemory = [17,0,0,0]}})
+
+-}
+
+push :: Register -> Computer -> Either String Computer
+push r c = case compareRegister r AX of
+    LT -> case c ^? memory . ix (c ^. cpu . sp) of
+        Nothing -> Left "push: stack pointer out of bounds"
+        Just _ ->
+            let (Left rr) = registerSelector @Identity @(Const Word8) r
+            in  Right $ c & cpu . sp .~ (c ^. cpu . sp - 1) & memory . ix (c ^. cpu . sp - 1) .~ (c ^. cpu . rr)
+    _
+        | isNothing (c ^? memory . ix (c ^. cpu . sp - 2))
+        -> Left "push: stack pointer out of bounds"
+        | otherwise
+        -> let (Right rr) = registerSelector @(Const Word16) @Identity r
+           in  Right
+                   $  c
+                   &  cpu
+                   .  sp
+                   .~ (c ^. cpu . sp - 2)
+                   &  memory
+                   .  ix (c ^. cpu . sp - 1)
+                   .~ highBit (c ^. cpu . rr)
+                   &  memory
+                   .  ix (c ^. cpu . sp - 2)
+                   .~ lowBit (c ^. cpu . rr)
+
+-- | push all general purpose registers
+pusha :: Computer -> Either String Computer
+pusha c = foldl' (\mc -> (>>=) mc . push) (pure c) [AX, BX, CX, DX, SP, BP, SI, DI]
+
+pop :: Register -> Computer -> Either String Computer
+pop r c = case compareRegister r AX of
+    LT -> case peekMemory (c ^. memory) (c ^. cpu . sp) of
+        Nothing -> Left "pop: stack pointer out of bounds"
+        Just i  -> let (Left wr) = registerSelector @Identity @Identity r in Right $ c & cpu . wr .~ i & cpu . sp .~ (c ^. cpu . sp + 1)
+    _ ->
+        let (Right wr) = registerSelector @Identity @(Const Word16) r
+        in  case peekMemory (c ^. memory) (c ^. cpu . sp) of
+                Nothing -> Left "pop: stack pointer out of bounds"
+                Just i  -> Right $ c & cpu . wr .~ i & cpu . sp .~ (c ^. cpu . sp + 2)
+
+-- | restore all general purpose registers
+popa :: Computer -> Either String Computer
+popa c =
+    let Just [di', si', bp', sp', dx', cx', bx', ax'] = mapM (peekMemory @Word16 (c ^. memory)) [c ^. cpu . sp, c ^. cpu . sp + 2 .. c ^. cpu . sp + 14]
+    in  Right
+            $  c
+            &  cpu
+            .  di
+            .~ di'
+            &  cpu
+            .  si
+            .~ si'
+            &  cpu
+            .  bp
+            .~ bp'
+            &  cpu
+            .  sp
+            .~ sp'
+            &  cpu
+            .  dx
+            .~ dx'
+            &  cpu
+            .  cx
+            .~ cx'
+            &  cpu
+            .  bx
+            .~ bx'
+            &  cpu
+            .  ax
+            .~ ax'
+
+{-
+
+>>> c = emptyCPU & ax .~ 0x0012 & bx .~ 0x1211 & cx .~ 0x2233 & dx .~ 0x4455 & sp .~ 20 & bp .~ 0x6677 & si .~ 0x7766 & di .~ 0x8899
+>>> m = Memory $ V.replicate 20 0xBEEF
+>>> com = Computer c m (TextMode 40 25 16 8)
+>>> com2 = Computer (emptyCPU & sp .~ 4) (Memory $ V.fromList [239,239,239,239,153,136,102,119,119,102,12,0,85,68,51,34,17,18,18,0]) (TextMode 40 25 16 8)
+
+>>> com
+Computer {_cpu = CPU {_ax = 18, _bx = 4625, _cx = 8755, _dx = 17493, _sp = 20, _bp = 26231, _si = 30566, _di = 34969, _ip = 0, _cs = 0, _ds = 0, _es = 0, _ss = 0, _flags = 0}, _memory = Memory {unMemory = [239,239,239,239,239,239,239,239,239,239,239,239,239,239,239,239,239,239,239,239]}, _videoMode = TextMode {_textModeWidth = 40, _textModeHeight = 25, _textModeColors = 16, _textModePages = 8}}
+
+>>> pusha com
+Right (Computer {_cpu = CPU {_ax = 18, _bx = 4625, _cx = 8755, _dx = 17493, _sp = 4, _bp = 26231, _si = 30566, _di = 34969, _ip = 0, _cs = 0, _ds = 0, _es = 0, _ss = 0, _flags = 0}, _memory = Memory {unMemory = [239,239,239,239,153,136,102,119,119,102,12,0,85,68,51,34,17,18,18,0]}, _videoMode = TextMode {_textModeWidth = 40, _textModeHeight = 25, _textModeColors = 16, _textModePages = 8}})
+
+>>> com2
+Computer {_cpu = CPU {_ax = 0, _bx = 0, _cx = 0, _dx = 0, _sp = 4, _bp = 0, _si = 0, _di = 0, _ip = 0, _cs = 0, _ds = 0, _es = 0, _ss = 0, _flags = 0}, _memory = Memory {unMemory = [239,239,239,239,153,136,102,119,119,102,12,0,85,68,51,34,17,18,18,0]}, _videoMode = TextMode {_textModeWidth = 40, _textModeHeight = 25, _textModeColors = 16, _textModePages = 8}}
+
+>>> popa com2
+Right (Computer {_cpu = CPU {_ax = 18, _bx = 4625, _cx = 8755, _dx = 17493, _sp = 12, _bp = 26231, _si = 30566, _di = 34969, _ip = 0, _cs = 0, _ds = 0, _es = 0, _ss = 0, _flags = 0}, _memory = Memory {unMemory = [239,239,239,239,153,136,102,119,119,102,12,0,85,68,51,34,17,18,18,0]}, _videoMode = TextMode {_textModeWidth = 40, _textModeHeight = 25, _textModeColors = 16, _textModePages = 8}})
 
 -}
 
